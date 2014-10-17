@@ -157,11 +157,6 @@ class myMilter(Milter.Base):
         # http://docs.python.org/release/2.7.6/library/email.message.html
 
 
-        # ### TODO ADD SUPPORT FOR MIME / ATTACHMENTS ####
-        if msg.is_multipart():
-            syslog('Multipart message type passed unmodified')
-            return Milter.CONTINUE
-
         gpgdir = '%s/%s' % (spool_dir, self.id)
         if os.path.isdir(gpgdir):
             shutil.rmtree(gpgdir)
@@ -178,6 +173,9 @@ class myMilter(Milter.Base):
         gpg = gnupg.GPG(gnupghome=gpgdir)
         gpg.decode_errors="ignore"
         for recipient in recipients:
+            if not "@" in recipient:
+               syslog('Something is wrong here. No @ in recipient. Let it go.')
+               return Milter.CONTINUE
             (username, domainname) = recipient.split('@')
             rfcname = sha224(username).hexdigest()
             qname = '%s._openpgpkey.%s' % (rfcname, domainname)
@@ -215,29 +213,65 @@ class myMilter(Milter.Base):
             fingerprints.append(ikey['fingerprint'])
         fpliststr = ','.join(fingerprints)
 
-        if 'subject' in msg:
-            subject = msg['subject']
-        msgstr = '''Subject:%s %s''' % (subject, msg)
-        if '-----BEGIN PGP MESSAGE-----' in msgstr:
+        if msg.has_key("X-OPENPGPKEY"):
+            # Have we already seen this message?
+            if "Encrypted" in msg.__get_item__("X-OPENPGPKEY"):
+                syslog('Message already gone through X-OPENPGPKEY - letting it go unmodified')
+                return Milter.CONTINUE
+           
+        if "encrypted" in msg.get_content_type().lower():  
             # already encrypted, let it go as is
             syslog('Message already encrypted - letting it go unmodified')
             return Milter.CONTINUE
 
+        # Not checking for encrypted messages described as plain text
+        # Users client can decide what's encrypted and what is merely a mention of something encrypted
+        # (a string match on -----BEGIN PGP MESSAGE----- too weak )
+        # Although clients need to do recursive decryption (which thunderbird doesn't do it appears)
+        
         gpg = gnupg.GPG(gnupghome=gpgdir)
         gpg.decode_errors="ignore"
         syslog('Will encrypt message to fingerprints:%s' % fpliststr)
-        enc_msg = gpg.encrypt(msgstr, fingerprints, always_trust=True)
+        self.fp.seek(0)
+        enc_msg = gpg.encrypt(self.fp.read(), fingerprints, always_trust=True)
         if enc_msg.data == '':
             # gpg binary and pythong wrapper is bad at giving us an error message
             syslog('Encryption to %s failed - failing message for retry later' % fpliststr)
             return Milter.TEMPFAIL
 
         self.chgheader('User-Agent', 1, 'dkim-openpgpkey')
-        self.chgheader('Subject', 1, '[openpgpkey-milter encrypted message]')
+        #self.chgheader('Subject', 1, '[openpgpkey-milter encrypted message]')
+
+        # This needs to be set right for our new encrypted data
+        self.chgheader("Content-Transfer-Encoding",1,"7bit");
+
         self.chgheader('X-OPENPGPKEY', 1, 'Encrypted to key(s): %s ' % fpliststr)
 
+
+        ## A static boundary marker - Is this okay?
+        ## Can --XXXXXXX appear in PGP ? 
+        self.chgheader('Content-type', 1, """multipart/encrypted;
+ protocol="application/pgp-encrypted";
+ boundary="tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3" """)
+
         # Replace original email with our encrypted version
-        self.replacebody(enc_msg.data)
+        self.replacebody("""This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156)
+
+--tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3
+Content-Type: application/pgp-encrypted
+Content-Description: PGP/MIME version identification
+
+Version: 1
+
+--tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3
+Content-Type: application/octet-stream; name="encrypted.asc"
+Content-Description: OpenPGP encrypted message
+Content-Disposition: inline; filename="encrypted.asc"
+
+""" + enc_msg.data + """
+
+--tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3--
+""")
 
         return Milter.ACCEPT
 
