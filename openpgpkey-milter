@@ -146,6 +146,33 @@ class myMilter(Milter.Base):
         self.fp.write(chunk)
         return Milter.CONTINUE
 
+    def findakey(self,username,domainname):
+            
+            # just need this for error reporting
+            recipient = username + "@" + domainname
+
+            rfcname = sha224(username).hexdigest()
+            qname = '%s._openpgpkey.%s' % (rfcname, domainname)
+            (status, result) = ctx.resolve(qname, OPENPGPKEY,
+                    unbound.RR_CLASS_IN)
+            if status != 0:
+                # can this ever happen?
+                syslog("unbound openpgpkey lookup for '%s' returned non-zero status, deferring" % recipient)
+                return (Milter.TEMPFAIL,status,result)
+            if result.rcode_str == 'serv fail':
+                syslog("unbound openpgpkey lookup for '%s' returned SERVFAIL, deferring" % recipient)
+                return (Milter.TEMPFAIL,status,result)
+            if result.bogus:
+                syslog("unbound openpgpkey lookup for '%s' returned with INVALID DNSSEC data, deferring" % recipient)
+                return (Milter.TEMPFAIL,status,result)
+            if not result.secure:
+                syslog("unbound openpgpkey lookup for '%s' ignored as the domain is not signed with DNSSEC - will not deliver unencrypted" % recipient)
+                return (Milter.TEMPFAIL,status,result) # consider REJECT
+            if not result.havedata:
+                syslog("unbound openpgpkey lookup for '%s' succeeded but no OpenPGP key publishd - will not deliver unencrypted" % recipient)
+                return (Milter.TEMPFAIL,status,result) # consider REJECT
+            return (Milter.CONTINUE,status,result)
+
     def eom(self):
         self.fp.seek(0)
         subject = 'none'
@@ -177,27 +204,28 @@ class myMilter(Milter.Base):
             if not "@" in recipient:
                syslog('Malformed address or local mail. No @ in recipient. Let it go.')
                return Milter.CONTINUE
+           
             (username, domainname) = recipient.split('@')
-            rfcname = sha224(username).hexdigest()
-            qname = '%s._openpgpkey.%s' % (rfcname, domainname)
-            (status, result) = ctx.resolve(qname, OPENPGPKEY,
-                    unbound.RR_CLASS_IN)
-            if status != 0:
-                # can this ever happen?
-                syslog("unbound openpgpkey lookup for '%s' returned non-zero status, deferring" % recipient)
-                return Milter.TEMPFAIL
-            if result.rcode_str == 'serv fail':
-                syslog("unbound openpgpkey lookup for '%s' returned SERVFAIL, deferring" % recipient)
-                return Milter.TEMPFAIL
-            if result.bogus:
-                syslog("unbound openpgpkey lookup for '%s' returned with INVALID DNSSEC data, deferring" % recipient)
-                return Milter.TEMPFAIL
-            if not result.secure:
-                syslog("unbound openpgpkey lookup for '%s' ignored as the domain is not signed with DNSSEC - deferring" % recipient)
-                return Milter.TEMPFAIL
-            if not result.havedata:
-                syslog("unbound openpgpkey lookup for '%s' succeeded but no OpenPGP key publishd - deferring" % recipient)
-                return Milter.TEMPFAIL
+
+            keyfind = self.findakey(username,domainname)
+
+            (action,status,result) = keyfind
+    
+            if(action != Milter.CONTINUE):
+                # Try a root cert (@domainname)
+                # What's a sha hash of nothing?
+                keyfind_root = self.findakey("",domainname)
+                (action,status,result) = keyfind_root
+                if(action != Milter.CONTINUE):
+                    ## return original failure code
+                    (action,status,result) = keyfind
+                    return action
+                keyfind = keyfind_root
+                (action,status,result) = keyfind
+
+
+            
+            #Okay back to the original code
 
             # Finally, we have a key!
             for openpgpkey in result.data.raw:
@@ -218,7 +246,8 @@ class myMilter(Milter.Base):
 
         for ikey in imported_keys:
             syslog('Received DNSSEC secured OPENPGPKEY for %s: Key-ID:%s Fingerprint:%s'
-                    % (recipient, ikey['keyid'], ikey['fingerprint']))
+                    % (ikey['uids'], ikey['keyid'], ikey['fingerprint']))
+#                    % (recipient, ikey['keyid'], ikey['fingerprint'])) # only the last recipient? confusing. should map imported keys to email lookup
             fingerprints.append(ikey['fingerprint'])
         fpliststr = ','.join(fingerprints)
 
