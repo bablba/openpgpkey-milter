@@ -169,12 +169,13 @@ class myMilter(Milter.Base):
         recipients = []
         for entry in all_recipients:
             recipients.append(entry[1])
-        #syslog('recipients:%s' % recipients)
+
         gpg = gnupg.GPG(gnupghome=gpgdir)
         gpg.decode_errors="ignore"
         for recipient in recipients:
+            # Local mail?.. no @ - what should we do?
             if not "@" in recipient:
-               syslog('Something is wrong here. No @ in recipient. Let it go.')
+               syslog('Malformed address or local mail. No @ in recipient. Let it go.')
                return Milter.CONTINUE
             (username, domainname) = recipient.split('@')
             rfcname = sha224(username).hexdigest()
@@ -192,27 +193,36 @@ class myMilter(Milter.Base):
                 syslog("unbound openpgpkey lookup for '%s' returned with INVALID DNSSEC data, deferring" % recipient)
                 return Milter.TEMPFAIL
             if not result.secure:
-                syslog("unbound openpgpkey lookup for '%s' ignored as the domain is not signed with DNSSEC - letting go plaintext" % recipient)
-                return Milter.CONTINUE
+                syslog("unbound openpgpkey lookup for '%s' ignored as the domain is not signed with DNSSEC - deferring" % recipient)
+                return Milter.TEMPFAIL
             if not result.havedata:
-                syslog("unbound openpgpkey lookup for '%s' succeeded but no OpenPGP key publishd - letting go plaintext" % recipient)
-                return Milter.CONTINUE
+                syslog("unbound openpgpkey lookup for '%s' succeeded but no OpenPGP key publishd - deferring" % recipient)
+                return Milter.TEMPFAIL
 
             # Finally, we have a key!
             for openpgpkey in result.data.raw:
                 # TODO: check failure to import
                 import_result = gpg.import_keys(openpgpkey)
 
+        
+
         # if we get here, all recipients had an valid openpgpkey record so we can encrypt the message
         # collect fingerprints needed to target message encryption
         fingerprints = []
         imported_keys = gpg.list_keys()
+
+        if not imported_keys:
+            # Empty key list - fail
+            syslog("No keys for '%s' - deferring" % recipient)
+            return Milter.TEMPFAIL
+
         for ikey in imported_keys:
             syslog('Received DNSSEC secured OPENPGPKEY for %s: Key-ID:%s Fingerprint:%s'
                     % (recipient, ikey['keyid'], ikey['fingerprint']))
             fingerprints.append(ikey['fingerprint'])
         fpliststr = ','.join(fingerprints)
 
+        # Not sure if this works at all
         if msg.has_key("X-OPENPGPKEY"):
             # Have we already seen this message?
             if "Encrypted" in msg.__get_item__("X-OPENPGPKEY"):
