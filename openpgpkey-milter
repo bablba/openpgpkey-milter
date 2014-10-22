@@ -146,6 +146,41 @@ class myMilter(Milter.Base):
         self.fp.write(chunk)
         return Milter.CONTINUE
 
+    def stripper(self):
+        data = ""
+        # Return email with most headers 
+        # stripped
+        
+        self.fp.seek(0);
+        lines = self.fp.readlines()
+       
+    
+        headerdone = False
+        keepgoing = False;
+        for line in lines: 
+            if not headerdone:
+                if ( line.startswith(" ") or line.startswith("\t") )  and keepgoing:
+                    data = data + line
+                else:
+                    keepgoing = False
+                        
+                if line.lower().startswith("Content-type: ".lower()):
+                    data = data + line
+                    keepgoing = True
+                if line.lower().startswith("Content-Transfer-Encoding: ".lower()):
+                    data = data + line
+                    keepgoing = True
+                if line == "\n":
+                    data = data + line
+                    headerdone = True        
+                if line == "\r":
+                    data = data + line
+                    headerdone = True        
+            else:
+                data = data + line
+
+        return data
+
     def findakey(self,username,domainname):
             
             # just need this for error reporting
@@ -217,9 +252,12 @@ class myMilter(Milter.Base):
                 keyfind_root = self.findakey("",domainname)
                 (action,status,result) = keyfind_root
                 if(action != Milter.CONTINUE):
-                    ## return original failure code
-                    (action,status,result) = keyfind
-                    return action
+                     keyfind_root = self.findakey(username+"%"+domainname, self.receiver)
+                     (action,status,result) = keyfind_root
+                     if(action != Milter.CONTINUE):
+                        ## return original failure code
+                        (action,status,result) = keyfind
+                        return action
                 keyfind = keyfind_root
                 (action,status,result) = keyfind
 
@@ -241,7 +279,7 @@ class myMilter(Milter.Base):
 
         if not imported_keys:
             # Empty key list - fail
-            syslog("No keys for '%s' - deferring" % recipient)
+            syslog("No keys - deferring")
             return Milter.TEMPFAIL
 
         for ikey in imported_keys:
@@ -272,7 +310,7 @@ class myMilter(Milter.Base):
         gpg.decode_errors="ignore"
         syslog('Will encrypt message to fingerprints:%s' % fpliststr)
         self.fp.seek(0)
-        enc_msg = gpg.encrypt(self.fp.read(), fingerprints, always_trust=True)
+        enc_msg = gpg.encrypt(self.stripper(), fingerprints, always_trust=True)
         if enc_msg.data == '':
             # gpg binary and pythong wrapper is bad at giving us an error message
             syslog('Encryption to %s failed - failing message for retry later' % fpliststr)
