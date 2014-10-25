@@ -8,7 +8,7 @@ This version:
         1) Policy Record: Options (stored in _openpgpkeypolicy) (TXT)
         2) Encryption Record: The PGP encryption key (TYPE61) or where to get it (TXT) (stored in _openpgpkey)
 
-    Both of these are found with a heirarchical lookup until one succeeds or combined in the case of policies
+    Both of these are found with a heirarchical lookup until one succeeds
         1) user@domain
         2) @domain *
         3) user%domain@mailerdomain
