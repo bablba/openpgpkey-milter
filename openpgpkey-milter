@@ -86,6 +86,14 @@ class KeyType(object):
     KEY = 1
     POLICY = 2
 
+class LookupFailure(object):
+    OK = 0
+    FAILURE = 1
+    SERV_FAIL = 2
+    BOGUS = 3
+    NOT_SECURE = 4
+    NO_DATA = 5
+
 
 class myMilter(Milter.Base):
 
@@ -232,61 +240,78 @@ class myMilter(Milter.Base):
         if status != 0:
             logmessage = logmessage + "Failure"
             syslog(logmessage)
-            return False
+            return (LookupFailure.FAILURE,False)
         if result.rcode_str == 'serv fail':
             logmessage = logmessage + "Serv Fail"
             syslog(logmessage)
-            return False
-        if secure and (not result.secure or result.bogus):
+            return (LookupFailure.SERV_FAIL,False)
+        if result.bogus:
+            logmessage = logmessage + "Bogus"
+            syslog(logmessage)
+            return (LookupFailure.BOGUS,False)  
+        # every failure above this is a show stopper
+
+          
+        if secure and not result.secure:
             logmessage = logmessage + "Not secure (wanted)"
             syslog(logmessage)
-            return False
+            return (LookupFailure.NO_DATA,False) # assume no data
         if not result.havedata:
             logmessage = logmessage + "No data"
             syslog(logmessage)
-            return False
+            return (LookupFailure.NO_DATA,False)
 
         logmessage = logmessage + "(%d records)" % len(result.data.raw)
         syslog(logmessage)
-        return result.data.raw
+        return (LookupFailure.OK,result.data.raw)
 
 
 
    
     def findapolicy(self,username,domainname,myhostname,secure = True):
         ret = self.keytxtlookup( KeyType.POLICY,username,domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keytxtlookup( KeyType.POLICY,"",domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keytxtlookup( KeyType.POLICY,username+"%"+domainname,myhostname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
-    
+        return (LookupFailure.NO_DATA,[])
    
     def findakey(self,username,domainname,myhostname,secure = True):
         ret = self.keylookup( KeyType.KEY,username,domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keylookup( KeyType.KEY,"",domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keylookup( KeyType.KEY,username+"%"+domainname,myhostname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
+        return (LookupFailure.NO_DATA,[])
         
     def findatxtkey(self,username,domainname,myhostname,secure = False):
         ret = self.keytxtlookup( KeyType.KEY,username,domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keytxtlookup( KeyType.KEY,"",domainname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
         ret = self.keytxtlookup( KeyType.KEY,username+"%"+domainname,myhostname,secure)
-        if ret:
+        (status,data) = ret
+        if status == LookupFailure.OK or status != LookupFailure.NO_DATA:
             return ret;
-        
+        return (LookupFailure.NO_DATA,[])
 
                 
     def getkeyfromkeyserver(self,key_server,keyid):
@@ -318,7 +343,9 @@ class myMilter(Milter.Base):
             # just need this for error reporting
             recipient = username + "@" + domainname
 
-            policies = self.findapolicy(username,domainname,self.receiver,secure)
+            (status,policies) = self.findapolicy(username,domainname,self.receiver,secure)
+            if status != LookupFailure.OK and status != LookupFailure.NO_DATA:
+                return (Milter.TEMPFAIL,False,"")
 
             policy = ""
             if policies:
@@ -333,7 +360,9 @@ class myMilter(Milter.Base):
             # still no idea how to properly parse TXT records..
             gotfromkeyserver = False
             if "keyserver" in policy:
-                keyfetches = self.findatxtkey(username,domainname,self.receiver,secure)
+                (status,keyfetches) = self.findatxtkey(username,domainname,self.receiver,secure)
+                if status != LookupFailure.OK and status != LookupFailure.NO_DATA:
+                    return (Milter.TEMPFAIL,False,"")
                 keyfetch = ""
                 if keyfetches:
                     for p in keyfetches: 
@@ -361,7 +390,9 @@ class myMilter(Milter.Base):
                     keys = []
 
             if not gotfromkeyserver:
-                keys =  self.findakey(username,domainname,self.receiver,secure)
+                (status,keys) =  self.findakey(username,domainname,self.receiver,secure)
+                if status != LookupFailure.OK and status != LookupFailure.NO_DATA:
+                    return (Milter.TEMPFAIL,False,"")
 
             if "encrypt" in policy and not keys:
                 syslog("Policy says encrypt but we can't find a key. No go for you mister.")
