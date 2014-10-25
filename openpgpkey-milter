@@ -1,7 +1,9 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-# Copyright 2013-2014 Paul Wouters <paul@cypherpunks.ca>
+# This version by Andrew Betts <andrew.betts@jasp.com>
+#
+# Original Copyright 2013-2014 Paul Wouters <paul@cypherpunks.ca>
 #
 # Based on the pymilter example code
 # See the pymilter project at http://bmsi.com/python/milter.html
@@ -20,6 +22,7 @@
 VERSION = '0.4'
 ANCHOR = '/var/lib/unbound/root.anchor'
 OPENPGPKEY = 61
+KEYCACHE = '/someplacesomewhere'
 
 import Milter
 import StringIO
@@ -30,7 +33,13 @@ import os
 import shutil
 import argparse
 from hashlib import sha224
+import string
+import random
+import re
+import binascii
 
+from hkp import KeyServer
+    
 from socket import AF_INET6
 from Milter.utils import parse_addr
 if True:
@@ -66,6 +75,17 @@ except:
 spool_dir = '/var/spool/openpgpkey-milter'
 
 import gnupg
+
+
+class KeyAction(object):
+    ENCRYPT = 1
+    DONTENCRYPT = 2
+    AMBIVALENT = 3
+
+class KeyType(object):
+    KEY = 1
+    POLICY = 2
+
 
 class myMilter(Milter.Base):
 
@@ -180,34 +200,181 @@ class myMilter(Milter.Base):
                 data = data + line
 
         return data
+    
 
-    def findakey(self,username,domainname):
+    def keytxtlookup(self,t,username,domainname,secure = True):
+        ret =  self.keylookup(t,username,domainname,secure,unbound.RR_TYPE_TXT)
+        return ret
+
+    def keylookup(self,t,username,domainname,secure = True,class_type = OPENPGPKEY):
+        
+        if t == KeyType.KEY:
+            idstr = "_openpgpkey"
+        else:
+            idstr = "_openpgpkeypolicy"
+
+        if username=="":
+            rfcnameprefix = "" # what's the point of a huge string for this
+        else: 
+            rfcnameprefix = sha224(username).hexdigest() + "."
+
+        qname = '%s%s.%s' % (rfcnameprefix,idstr,domainname)
+        (status,result) = ctx.resolve(qname, class_type,
+                    unbound.RR_CLASS_IN)
+
+        logmessage = ""
+        if secure:
+            logmessage = logmessage + ("Secure %s lookup %s@%s (%s) " % (class_type,username,domainname,qname) )
+        else:
+            logmessage = logmessage + ("Insecure %s Lookup %s@%s (%s) " % (class_type,username,domainname,qname) )
+
+
+        if status != 0:
+            logmessage = logmessage + "Failure"
+            syslog(logmessage)
+            return False
+        if result.rcode_str == 'serv fail':
+            logmessage = logmessage + "Serv Fail"
+            syslog(logmessage)
+            return False
+        if secure and (not result.secure or result.bogus):
+            logmessage = logmessage + "Not secure (wanted)"
+            syslog(logmessage)
+            return False
+        if not result.havedata:
+            logmessage = logmessage + "No data"
+            syslog(logmessage)
+            return False
+
+        logmessage = logmessage + "(%d records)" % len(result.data.raw)
+        syslog(logmessage)
+        return result.data.raw
+
+
+
+   
+    def findapolicy(self,username,domainname,myhostname,secure = True):
+        ret = self.keytxtlookup( KeyType.POLICY,username,domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keytxtlookup( KeyType.POLICY,"",domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keytxtlookup( KeyType.POLICY,username+"%"+domainname,myhostname,secure)
+        if ret:
+            return ret;
+    
+   
+    def findakey(self,username,domainname,myhostname,secure = True):
+        ret = self.keylookup( KeyType.KEY,username,domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keylookup( KeyType.KEY,"",domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keylookup( KeyType.KEY,username+"%"+domainname,myhostname,secure)
+        if ret:
+            return ret;
+        
+    def findatxtkey(self,username,domainname,myhostname,secure = False):
+        ret = self.keytxtlookup( KeyType.KEY,username,domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keytxtlookup( KeyType.KEY,"",domainname,secure)
+        if ret:
+            return ret;
+        ret = self.keytxtlookup( KeyType.KEY,username+"%"+domainname,myhostname,secure)
+        if ret:
+            return ret;
+        
+
+                
+    def getkeyfromkeyserver(self,key_server,keyid):
+
+        cache_file = perm_spool_dir + "/" + binascii.hexlify(key_server)+"_"+binascii.hexlify(keyid)
+        keys = []
+        if os.path.isfile(cache_file):
+            with open (cache_file, "r") as myfile:
+                data=myfile.read()
+                syslog("Fetch from cache")
+                keys = [data]
+                myfile.close()
+        else:
+            try:
+                serv = KeyServer(key_server)
+                ret =  serv.search('0x' + keyid)
+                keys = []
+                for a  in ret:
+                    keys = [a.key]
+                    with open(cache_file, 'w') as myfile:
+                        myfile.write(a.key)
+                        myfile.close()
+            except:
+                syslog("Lookup failed")
+        return keys
+
+    def findakeyX(self,username,domainname,gpgin,secure=True):
             
             # just need this for error reporting
             recipient = username + "@" + domainname
 
-            rfcname = sha224(username).hexdigest()
-            qname = '%s._openpgpkey.%s' % (rfcname, domainname)
-            (status, result) = ctx.resolve(qname, OPENPGPKEY,
-                    unbound.RR_CLASS_IN)
-            if status != 0:
-                # can this ever happen?
-                syslog("unbound openpgpkey lookup for '%s' returned non-zero status, deferring" % recipient)
-                return (Milter.TEMPFAIL,status,result)
-            if result.rcode_str == 'serv fail':
-                syslog("unbound openpgpkey lookup for '%s' returned SERVFAIL, deferring" % recipient)
-                return (Milter.TEMPFAIL,status,result)
-            if result.bogus:
-                syslog("unbound openpgpkey lookup for '%s' returned with INVALID DNSSEC data, deferring" % recipient)
-                return (Milter.TEMPFAIL,status,result)
-            if not result.secure:
-                syslog("unbound openpgpkey lookup for '%s' ignored as the domain is not signed with DNSSEC - will not deliver unencrypted" % recipient)
-                return (Milter.TEMPFAIL,status,result) # consider REJECT
-            if not result.havedata:
-                syslog("unbound openpgpkey lookup for '%s' succeeded but no OpenPGP key publishd - will not deliver unencrypted" % recipient)
-                return (Milter.TEMPFAIL,status,result) # consider REJECT
-            return (Milter.CONTINUE,status,result)
+            policies = self.findapolicy(username,domainname,self.receiver,secure)
 
+            policy = ""
+            if policies:
+                for p in policies:
+                    policy = policy + " " + p
+
+            if "dontencrypt" in policy:
+                 syslog("Policy says dontencrypt. Okay. On we go...")
+                 return (Milter.CONTINUE,False,"")
+
+            # pretty lame... TXT record "keyserver keyid"
+            # still no idea how to properly parse TXT records..
+            gotfromkeyserver = False
+            if "keyserver" in policy:
+                keyfetches = self.findatxtkey(username,domainname,self.receiver,secure)
+                keyfetch = ""
+                if keyfetches:
+                    for p in keyfetches: 
+                        keyfetch = keyfetch + " " + "".join([ " " if (c == '\"') else c for c in p ])
+
+                keyfetch = "".join([ c if (c in string.ascii_letters or c in string.digits or c=="." or c==" ") else "" for c in p ])
+                keyfetch =  keyfetch.strip()
+                syslog(keyfetch)
+                if " " in keyfetch:
+                    (key_server,keyid) = keyfetch.split(" ",1)
+                    keyid = keyid.strip()
+                    key_server = "http://" + key_server.strip()
+                    syslog ("Fetching Key [%s] from [%s]" % (keyid,key_server))
+                    keys = self.getkeyfromkeyserver(key_server,keyid)
+                   
+                   
+                    if len(keys) > 0:
+                        syslog("Imported %s keys" % len(keys))
+                        gotfromkeyserver = True
+                    else:
+                        syslog("No keys imported")
+                    ## this isn't goood... 
+                   
+                else:
+                    keys = []
+
+            if not gotfromkeyserver:
+                keys =  self.findakey(username,domainname,self.receiver,secure)
+
+            if "encrypt" in policy and not keys:
+                syslog("Policy says encrypt but we can't find a key. No go for you mister.")
+                return (Milter.TEMPFAIL,False,"")
+            if not keys:
+                syslog("No keys. Policy doesn't care. Continue as usual.")
+                return (Milter.CONTINUE,False,"")
+
+
+            return (Milter.ACCEPT,keys,policy)
+
+    def id_generator(self,size=6, chars=string.ascii_uppercase + string.ascii_lowercase + string.digits):
+        return ''.join(random.choice(chars) for _ in range(size))
     def eom(self):
         self.fp.seek(0)
         subject = 'none'
@@ -223,6 +390,9 @@ class myMilter(Milter.Base):
         if os.path.isdir(gpgdir):
             shutil.rmtree(gpgdir)
         os.mkdir(gpgdir)
+
+        if not os.path.isdir(perm_spool_dir):
+            os.mkdir(perm_spool_dir)
 
         # get recipients from email message
         tos = msg.get_all('to', [])
@@ -242,34 +412,23 @@ class myMilter(Milter.Base):
            
             (username, domainname) = recipient.split('@')
 
-            keyfind = self.findakey(username,domainname)
 
-            (action,status,result) = keyfind
-    
-            if(action != Milter.CONTINUE):
-                # Try a root cert (@domainname)
-                # What's a sha hash of nothing?
-                keyfind_root = self.findakey("",domainname)
-                (action,status,result) = keyfind_root
-                if(action != Milter.CONTINUE):
-                     keyfind_root = self.findakey(username+"%"+domainname, self.receiver)
-                     (action,status,result) = keyfind_root
-                     if(action != Milter.CONTINUE):
-                        ## return original failure code
-                        (action,status,result) = keyfind
-                        return action
-                keyfind = keyfind_root
-                (action,status,result) = keyfind
+            (result,keys,policy) = self.findakeyX(username,domainname,gpg,param_secure)
 
+            if result != Milter.ACCEPT:
+                return result;
 
             
-            #Okay back to the original code
-
             # Finally, we have a key!
-            for openpgpkey in result.data.raw:
+            for openpgpkey in keys:
+                
+                if False:
+                    # I'm defining a special 1 byte entry to mean don't encrypt (Note: can use a policy record instead)
+                    if len(openpgpkey)==1:
+                        return Milter.CONTINUE
                 # TODO: check failure to import
                 import_result = gpg.import_keys(openpgpkey)
-
+                
         
 
         # if we get here, all recipients had an valid openpgpkey record so we can encrypt the message
@@ -279,12 +438,12 @@ class myMilter(Milter.Base):
 
         if not imported_keys:
             # Empty key list - fail
-            syslog("No keys - deferring")
-            return Milter.TEMPFAIL
+            syslog("No keys (probably no recipients) - reject")
+            return Milter.REJECT
 
         for ikey in imported_keys:
-            syslog('Received DNSSEC secured OPENPGPKEY for %s: Key-ID:%s Fingerprint:%s'
-                    % (ikey['uids'], ikey['keyid'], ikey['fingerprint']))
+            syslog('Received %sKEY for %s: Key-ID:%s Fingerprint:%s'
+                    % ("DNSSEC secured " if param_secure else "insecure ", ikey['uids'], ikey['keyid'], ikey['fingerprint']))
 #                    % (recipient, ikey['keyid'], ikey['fingerprint'])) # only the last recipient? confusing. should map imported keys to email lookup
             fingerprints.append(ikey['fingerprint'])
         fpliststr = ','.join(fingerprints)
@@ -292,7 +451,7 @@ class myMilter(Milter.Base):
         # Not sure if this works at all
         if msg.has_key("X-OPENPGPKEY"):
             # Have we already seen this message?
-            if "Encrypted" in msg.__get_item__("X-OPENPGPKEY"):
+            if any("encrypted" in s.lower() for s in msg.get_all("X-OPENPGPKEY",[])):
                 syslog('Message already gone through X-OPENPGPKEY - letting it go unmodified')
                 return Milter.CONTINUE
            
@@ -309,47 +468,82 @@ class myMilter(Milter.Base):
         gpg = gnupg.GPG(gnupghome=gpgdir)
         gpg.decode_errors="ignore"
         syslog('Will encrypt message to fingerprints:%s' % fpliststr)
-        self.fp.seek(0)
-        enc_msg = gpg.encrypt(self.stripper(), fingerprints, always_trust=True)
+
+        if "alwayspgpmime" in policy:
+            syslog("Policy says recipient likes PGP/MIME :D. Good.")
+            pgpmime = True
+        else:
+            pgpmime = False # for now
+
+        if not pgpmime and msg.is_multipart():
+            pgpmime = True
+            syslog("This is a multipart message. Must use PGP/MIME.")
+    
+
+        if pgpmime:
+            self.fp.seek(0)
+            enc_msg = gpg.encrypt(self.stripper(), fingerprints, always_trust=True)
+        else:
+            if 'subject' in msg:
+                subject = msg['subject']
+            msgstr = '''Subject:%s\n%s''' % (subject, self.stripper())
+            enc_msg = gpg.encrypt(msgstr, fingerprints, always_trust=True)
+    
         if enc_msg.data == '':
             # gpg binary and pythong wrapper is bad at giving us an error message
             syslog('Encryption to %s failed - failing message for retry later' % fpliststr)
             return Milter.TEMPFAIL
 
         self.chgheader('User-Agent', 1, 'dkim-openpgpkey')
-        #self.chgheader('Subject', 1, '[openpgpkey-milter encrypted message]')
 
-        # This needs to be set right for our new encrypted data
-        self.chgheader("Content-Transfer-Encoding",1,"7bit");
+        newsubject = ""
+        if "keepsubject" in policy:
+            if msg.has_key("Subject"):
+                newsubject = msg['subject']
+        else:
+            newsubject = "[openpgpkey encrypted message]"
 
+        if "debug" in policy:
+            newsubject = newsubject + ' [' + fpliststr + ']'
+
+        self.chgheader('Subject', 1, newsubject)
         self.chgheader('X-OPENPGPKEY', 1, 'Encrypted to key(s): %s ' % fpliststr)
 
+        if pgpmime:
+            # This needs to be set right for our new encrypted data
+            self.chgheader("Content-Transfer-Encoding",1,"7bit");
 
-        ## A static boundary marker - Is this okay?
-        ## Can --XXXXXXX appear in PGP ? 
-        self.chgheader('Content-type', 1, """multipart/encrypted;
- protocol="application/pgp-encrypted";
- boundary="tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3" """)
+            # A proper random boundary
+            boundary = self.id_generator(35)
 
-        # Replace original email with our encrypted version
-        self.replacebody("""This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156)
+            self.chgheader('Content-type', 1, """multipart/encrypted;
+     protocol="application/pgp-encrypted";
+     boundary=""" + "\"" + boundary + "\"")
 
---tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3
+
+            # Replace original email with our encrypted version
+            self.replacebody("""This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156)
+
+--""" + boundary + """
 Content-Type: application/pgp-encrypted
 Content-Description: PGP/MIME version identification
 
 Version: 1
 
---tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3
+--""" + boundary + """
 Content-Type: application/octet-stream; name="encrypted.asc"
 Content-Description: OpenPGP encrypted message
 Content-Disposition: inline; filename="encrypted.asc"
 
 """ + enc_msg.data + """
 
---tt5vxDSI4KdVw05nnf9XakveTH3OB9bx3--
+--"""+boundary+"""--
 """)
+        else:
+            # original behaviour
+            self.replacebody( enc_msg.data)
 
+            
         return Milter.ACCEPT
 
     def close(self):
@@ -382,6 +576,8 @@ def background():
 
 def main():
     global spool_dir
+    global perm_spool_dir
+    global param_secure
     global ctx
     parser = \
         argparse.ArgumentParser(description='OPENPGPKEY milter application'
@@ -400,6 +596,8 @@ def main():
                         help='spool dir for tmp files (default /var/spool/openpgpkey-milter)')
     parser.add_argument('--timeout', '-t', action='store', default=600,
                         help='timeout (default 600)')
+    parser.add_argument('--ignoreinsecure', '-i', action="store_true",
+                        help='allow insecure DNS results')
     parser.add_argument('--version', action='store_true',
                         help='show version and exit')
     args = parser.parse_args()
@@ -415,6 +613,8 @@ def main():
 
     socketname = 'inet:%s@127.0.0.1' % args.port
     spool_dir = args.spool
+    perm_spool_dir = spool_dir + "/perm"
+    param_secure = not args.ignoreinsecure
 
     bt = Thread(target=background)
     bt.start()
@@ -435,8 +635,8 @@ def main():
        except:
               sys.exit("Failed to write pid, aborted")
 
-    syslog('starting daemon [%s] version %s on port %s at %s with timeout %s'
-            % (mypid, VERSION, args.port, args.spool, args.timeout))
+    syslog('starting daemon [%s] version %s on port %s at %s with timeout %s [%s]'
+            % (mypid, VERSION, args.port, args.spool, args.timeout, "insecure mode" if args.ignoreinsecure else "secure mode"))
     sys.stdout.flush()
     Milter.runmilter('pythonfilter', socketname, args.timeout)
     logq.put(None)

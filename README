@@ -1,3 +1,36 @@
 See https://github.com/letoams/openpgpkey-milter
 
 Don't use this version.
+
+This version:
+
+    There are two type of key lookup
+        1) Policy Record: Options (stored in _openpgpkeypolicy) (TXT)
+        2) Encryption Record: The PGP encryption key (TYPE61) or where to get it (TXT) (stored in _openpgpkey)
+
+    Both of these are found with a heirarchical lookup until one succeeds or combined in the case of policies
+        1) user@domain
+        2) @domain *
+        3) user%domain@mailerdomain
+
+    * = username hash is omitted for this key lookup - can't see the point of keeping it
+
+    The Policy Record stores configuration options saying how the PGP key should be found and how the mail should be delivered. Current options are:
+     "debug" "keyserver" "keepsubject" "encrypt" "dontencrypt" "alwayspgpmime"
+        
+    The "keyserver" option means the corresponding Encryption Record specifies a key server and key-id to use. eg "pgp.mit.edi 012345678012345678"
+
+    The "encrypt" option means do not let past any email without encryption
+
+    The "dontencrypt" option means let the mail continue as normal. (Useful for per user override of domain/mailserver level options)
+
+    The "alwayspgpmime" option will wrap all messages in a PGP/MIME instead of just multipart text messages.
+
+
+    Additional command line switches:
+        --ignoreinsecure option: doesn't care if the domain is DNSSEC
+
+    
+    Hopefully if no additional records are set this behaves identically to letoams/openpgpkey-milter, save for 2 things:
+        1) Multipart messages are delivered
+        2) Encrypted plain text messages have most of their headers removed before encryption (Why can't we remove them all ?!) If you are sending through anonymising email servers you don't want your identity in there. 
