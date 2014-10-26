@@ -227,6 +227,10 @@ class myMilter(Milter.Base):
             rfcnameprefix = sha224(username).hexdigest() + "."
 
         qname = '%s%s.%s' % (rfcnameprefix,idstr,domainname)
+
+
+        ## TODO !!!! Make this work with CNAMEs 
+        ## 
         (status,result) = ctx.resolve(qname, class_type,
                     unbound.RR_CLASS_IN)
 
