@@ -544,10 +544,11 @@ class myMilter(Milter.Base):
         self.chgheader('Subject', 1, newsubject)
         self.chgheader('X-OPENPGPKEY', 1, 'Encrypted to key(s): %s ' % fpliststr)
 
-        if pgpmime:
-            # This needs to be set right for our new encrypted data
-            self.chgheader("Content-Transfer-Encoding",1,"7bit");
+        # This needs to be set right for our new encrypted data
+        self.chgheader("Content-Transfer-Encoding",1,"7bit");
 
+        if pgpmime:
+ 
             # A proper random boundary
             boundary = self.id_generator(35)
 
@@ -575,6 +576,8 @@ Content-Disposition: inline; filename="encrypted.asc"
 --"""+boundary+"""--
 """)
         else:
+            # Looks like there are some people who send single part html messages.
+            self.chgheader('Content-type', 1, "text/plain")
             # original behaviour
             self.replacebody( enc_msg.data)
 
